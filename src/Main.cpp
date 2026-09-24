@@ -154,7 +154,7 @@ const unsigned long FLOW_START_TIMEOUT_MS = 5000;
 // APP COMMUNICATION
 struct RecipeData {
     unsigned int TargetBeanWeight  =  25;  // grams
-    unsigned int TargetWaterTemp   =  50;   // °C
+    unsigned int TargetWaterTemp   =  35;   // °C
     unsigned int TargetWaterWeight = 150; // mL
     unsigned int TargetFlowRate;    // mL/sec
 };
@@ -197,7 +197,7 @@ const int SERVER_PORT     = 80;
 
 // YF201 Flow Sensor ISR - counts pulses from turbine
 void IRAM_ATTR FlowSensorISR() {
-    FlowPulseCount++;
+    FlowPulseCount = FlowPulseCount + 1;
 }
 
 // Calculate flow rate from pulse count
@@ -234,7 +234,7 @@ enum MachineStates{ // !!!!WRITE COMMENTS!!!!
     ERROR           // Handle errors, monitor for acknowledgment and shutdown
 };
 
-MachineStates CurrentState = DISPENSE; // Initialize in IDLE
+MachineStates CurrentState = GRIND; // Initialize in IDLE
 
 // The dispenser fills the showerhead in 45 mL-or-smaller batches, then lets it drain.
 enum DispensePhase {
@@ -249,7 +249,7 @@ enum DispensePhase {
 DispensePhase CurrentDispensePhase = DISPENSE_BLOOM;
 unsigned int CurrentPour = 0;  // 0 = bloom, 1-4 = regular pours
 float TotalDispenseTargetML = 0.0;
-float BloomTargetML = 0.0;
+float BloomTargetML = 37.5;
 float PourTargetML = 0.0;
 float CurrentPourTargetML = 0.0;
 float CurrentPourDispensedML = 0.0;
@@ -384,8 +384,9 @@ unsigned long DispensePhaseStartTime = 0;
     }
 }
 */
+
 void HandleTARE(){
-    delay(60000);
+    delay(5000);
     LoadCellBeans_1.begin(DOUT_1, CLK_1);
     LoadCellBeans_2.begin(DOUT_2, CLK_2);
 
@@ -406,7 +407,6 @@ void HandleTARE(){
         for (int i = 1; i < 26; i++){
             long reading_1 = LoadCellBeans_1.read();
             long reading_2 = LoadCellBeans_2.read();
-            
             sum_1 += reading_1;
             sum_2 += reading_2;
             delay(200);
@@ -425,6 +425,7 @@ void HandleTARE(){
     Serial.print("HX711_2 CF: ");
     Serial.println(Offset_2);
 }
+
 void HandleGRIND(){
     // PHASE 1: Wait for container to be placed on scale
     if (StateFlags.GENERAL_Initialized == false){ // First run this state
@@ -445,8 +446,8 @@ void HandleGRIND(){
                 Serial.println("[GRIND] Container confirmed. Measuring initial weight...");
             
                 StateStartTime = millis();
-                InitialWeightBeans = (LoadCellBeans_1.read() - Offset_1) * CalibrationFactor_1 + 
-                                     (LoadCellBeans_2.read() - Offset_2) * CalibrationFactor_2;
+                InitialWeightBeans = (LoadCellBeans_1.read() - Offset_1) * abs(CalibrationFactor_1) + 
+                                     (LoadCellBeans_2.read() - Offset_2) * abs(CalibrationFactor_2);
                 GrindWeightBeans = InitialWeightBeans;
 
                 Serial.println("[GRIND TEST] Initial weight recorded: " + String(InitialWeightBeans)); //TEST
@@ -529,6 +530,7 @@ void HandleGRIND(){
         }
     }
 }
+
 void HandleUSER_PROMPT(){
     if (StateFlags.GENERAL_Initialized == false){ // First run this state
         pinMode(PUMP_1_PIN, OUTPUT);
@@ -647,6 +649,7 @@ void HandleUSER_PROMPT(){
         return;
     }
 }
+
 void HandleHEAT(){
     if (StateFlags.GENERAL_Initialized == false){ // First run this state
         digitalWrite(HEATER_PIN, HIGH);  // Turn heater ON
@@ -694,6 +697,7 @@ void HandleHEAT(){
         return;
     }
 }
+
 void StartShowerheadFill(float requestedVolumeML) {
     CurrentFillTargetML = requestedVolumeML > SHOWERHEAD_CAPACITY_ML
                               ? SHOWERHEAD_CAPACITY_ML
@@ -717,7 +721,6 @@ void StopDispenseWithError(const char *message) {
     StateStartTime = millis();
     Serial.println(message);
 }
-
 void HandleDISPENSE(){
     if (StateFlags.GENERAL_Initialized == false) { // First run in this state
         pinMode(SOLENOID_PIN, OUTPUT);
@@ -884,7 +887,7 @@ void HandleDISPENSE(){
 
         StateFlags.DISPENSE_DispensingComplete = true;
         StateFlags.GENERAL_Initialized = false;
-        CurrentState = IDLE;
+        CurrentState = GRIND;
         StateStartTime = millis();
 
         Serial.println("[DISPENSE] ========== DISPENSE COMPLETE ==========");
@@ -893,6 +896,7 @@ void HandleDISPENSE(){
         Serial.println(" mL");
     }
 }
+
 void HandleERROR(){ //NOT CORRECT CURRENTLY
     // Turn ALL actuators OFF (safety shutdown)
     //digitalWrite(MOTOR_DRIVER_PIN, LOW);
@@ -930,26 +934,14 @@ void HandleERROR(){ //NOT CORRECT CURRENTLY
 void setup() {
     Serial.begin(115200);
     TempSensor.begin();
- //   pinMode(HEATER_PIN, OUTPUT);
-  //  digitalWrite(HEATER_PIN, LOW);
-   // HandleTARE();
-
-   pinMode(SOLENOID_PIN, OUTPUT);
-        pinMode(PUMP_2_PIN, OUTPUT);
-        pinMode(FLOW_SENSOR_PIN_2, INPUT_PULLUP);
-
-   digitalWrite(SOLENOID_PIN, HIGH); // Turn solenoid ON (open valve)
-        delay(500);
-        digitalWrite(PUMP_2_PIN, HIGH);   // Turn PUMP_2 ON
-
-        delay(1000);
-        digitalWrite(PUMP_2_PIN, LOW);   // Turn PUMP_2 OFF
+    pinMode(HEATER_PIN, OUTPUT);
+    digitalWrite(HEATER_PIN, LOW);
+    HandleTARE();
 }
-//Retry one more time
+
 void loop(){  
 
-
-    /*switch(CurrentState){
+    switch(CurrentState){
         case IDLE:
             //HandleIDLE();
             break;
@@ -963,11 +955,11 @@ void loop(){
             HandleHEAT();
             break;
         case DISPENSE:
-            //HandleDISPENSE();
+            HandleDISPENSE();
             break;
         case ERROR:
             //HandleERROR();
             break;
     }
-            */
+            
 }
