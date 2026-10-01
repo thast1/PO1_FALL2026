@@ -397,7 +397,7 @@ void BleSetup() {
 
 // Replaces the boot-self-test HandleIDLE() that used to live here
 // (commented out) - it referenced hardware that isn't in this version of
-// the file any more (MOTOR_DRIVER_PIN, a single LoadCellBeans/
+// the file any more (MOTOR_DRIVER_PIN), a single LoadCellBeans/
 // CalibrationFactorBeans, and a LoadCellWater/CalibrationFactorWater -
 // water is measured by the flow sensor now, not a load cell). Rebuilding a
 // boot self-test is worth doing once the water-sensing hardware is
@@ -405,6 +405,11 @@ void BleSetup() {
 // in its "already initialized" branch.
 void HandleIDLE(){
     // Safe state while we wait for the app to send a recipe.
+    pinMode(MOTOR_PWM_PIN, OUTPUT);
+    pinMode(PUMP_1_PIN, OUTPUT);
+    pinMode(PUMP_2_PIN, OUTPUT);
+    pinMode(SOLENOID_PIN, OUTPUT);
+
     digitalWrite(MOTOR_PWM_PIN, LOW);
     digitalWrite(PUMP_1_PIN, LOW);
     digitalWrite(PUMP_2_PIN, LOW);
@@ -472,7 +477,7 @@ void HandleGRIND(){
         pinMode(MOTOR_PWM_PIN, OUTPUT);
         pinMode(MOTOR_DIR_PIN, OUTPUT);
 
-        Serial.println("[GRIND] Place container on scale and press 's' to start");
+        Serial.println("[GRIND] Place container on scale and press 'Continue' to start");
         StateStartTime = millis();
         StateFlags.GENERAL_Initialized = true;
         return;  // Exit early, wait for input
@@ -481,10 +486,7 @@ void HandleGRIND(){
     // PHASE 2: Wait for user confirmation, then measure initial weight and start motor
     if (StateFlags.GRIND_WeightMeasured == false) {
         bool confirmed = false;
-        if (Serial.available()) {
-            char input = Serial.read();
-            if (input == 's' || input == 'S') confirmed = true;
-        }
+        
         if (StartCommandReceived) {   // set by onWrite() for the app's "START_GRIND"
             StartCommandReceived = false;
             confirmed = true;
@@ -1018,7 +1020,7 @@ void loop(){
 
     switch(CurrentState){
         case IDLE:
-            //HandleIDLE();
+            HandleIDLE();
             break;
         case GRIND:
             HandleGRIND();
