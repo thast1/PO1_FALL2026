@@ -32,11 +32,18 @@
 #include <OneWire.h> // Dallas OneWire Communication Protocol
 #include <DallasTemperature.h> // Dallas DS18B20 Temperature Sensor Interfacing Protocol
 
+// App communication over Bluetooth - same approach as PO1_Hardware_BLE_Test
+// (standalone BLE proof-of-concept) in the MobileApp repo.
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <ArduinoJson.h>
+
 // USE THIS OR REST API??
 // You'll need to add these libraries to your includes at the top:
 // #include <WebServer.h>
 // #include <WebSocketsServer.h>
-// #include <ArduinoJson.h>
 
 //======================================================================================
 // GPIO PIN CONFIGURATION
@@ -71,6 +78,7 @@ unsigned long int StateChangeTime = 0;    // Initialize Time Tracking for States
 // TARGET VALUES
 unsigned int bean_weight_diff     = 0; // Target weight for grinding (current weight - target weight)
 unsigned int water_temp           = 0; // Target temperature for heating water
+unsigned int water_weight         = 0; // Target water weight, staged from the app's SET_RECIPE command
 unsigned int flow_rate            = 0; // Target flow rate for pumping water (mL/sec)
 
 // CYCLE TRACKING
@@ -234,7 +242,7 @@ enum MachineStates{ // !!!!WRITE COMMENTS!!!!
     ERROR           // Handle errors, monitor for acknowledgment and shutdown
 };
 
-MachineStates CurrentState = GRIND; // Initialize in IDLE
+MachineStates CurrentState = IDLE; // Initialize in IDLE
 
 // The dispenser fills the showerhead in 45 mL-or-smaller batches, then lets it drain.
 enum DispensePhase {
@@ -257,133 +265,165 @@ float CurrentFillTargetML = 0.0;
 unsigned long FillStartPulseCount = 0;
 unsigned long DispensePhaseStartTime = 0;
 
-/*void HandleIDLE(){
-    if (StateFlags.GENERAL_Initialized == false){
-        if (StateFlags.IDLE_SystemReady == false) {
-            // Boot sequence - test actuators and sensors
-            if (BootStep == 0) { // Test Motor
-                digitalWrite(MOTOR_DRIVER_PIN, HIGH);
-                delay(100);
-                digitalWrite(MOTOR_DRIVER_PIN, LOW);
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 1) { // Test Pump1
-                digitalWrite(PUMP_1_PIN, HIGH);
-                delay(100);
-                digitalWrite(PUMP_1_PIN, LOW);
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 2) { // Test Pump2
-                digitalWrite(PUMP_2_PIN, HIGH);
-                delay(100);
-                digitalWrite(PUMP_2_PIN, LOW);
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 3) { // Test Heater
-                digitalWrite(HEATER_PIN, HIGH);
-                delay(100);
-                digitalWrite(HEATER_PIN, LOW);
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 4) { // Test Solenoid
-                digitalWrite(SOLENOID_PIN, HIGH);
-                delay(100);
-                digitalWrite(SOLENOID_PIN, LOW);
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 5) { // Read LoadCellBeans
-                CurrentWeightBeans = LoadCellBeans.get_units();
-                if (CurrentWeightBeans > -1000 && CurrentWeightBeans < 1000) {
-                    BootStep++;
-                    BootRetries = 0;
-                } else {
-                    BootRetries++;
-                    if (BootRetries > MAX_BOOT_RETRIES) {
-                        CurrentState = ERROR;
-                        StateFlags.IDLE_SystemReady = true;
-                    }
-                }
-            }
-            else if (BootStep == 6) { // Calibrate LoadCellBeans
-                CalibrationFactorBeans = 1.0;
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 7) { // Read LoadCellWater
-                CurrentWeightWater = LoadCellWater.get_units();
-                if (CurrentWeightWater > -1000 && CurrentWeightWater < 2000) {
-                    BootStep++;
-                    BootRetries = 0;
-                } else {
-                    BootRetries++;
-                    if (BootRetries > MAX_BOOT_RETRIES) {
-                        CurrentState = ERROR;
-                        StateFlags.IDLE_SystemReady = true;
-                    }
-                }
-            }
-            else if (BootStep == 8) { // Calibrate LoadCellWater
-                CalibrationFactorWater = 1.0;
-                BootStep++;
-                BootRetries = 0;
-            }
-            else if (BootStep == 9) { // Read TempSensor
-                TempSensor.requestTemperatures();
-                CurrentTemperature = TempSensor.getTempCByIndex(0);
-                if (CurrentTemperature > -50 && CurrentTemperature < 150) {
-                    BootStep++;
-                    BootRetries = 0;
-                } else {
-                    BootRetries++;
-                    if (BootRetries > MAX_BOOT_RETRIES) {
-                        CurrentState = ERROR;
-                        StateFlags.IDLE_SystemReady = true;
-                    }
-                }
-            }
-            else if (BootStep == 10) { // All tests passed
-                StateFlags.IDLE_SystemReady = true;
-                StateFlags.GENERAL_Initialized = true;
-                BootStep = 0;
-                BootRetries = 0;
-            }
-            
-            // Check boot timeout
-            if (millis() - StateStartTime > 60000) {
-                CurrentState = ERROR;
-                StateFlags.IDLE_SystemReady = true;
-            }
-        }
+//======================================================================================
+// BLE COMMUNICATION (app <-> machine)
+//======================================================================================
+// Same device name + UUIDs as the BLE test rig in the MobileApp repo
+// (PO1_Hardware_BLE_Test/src/main.cpp), so the app connects with no changes
+// on its side.
+#define BLE_SERVICE_UUID      "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+#define BLE_STATUS_CHAR_UUID  "6e400003-b5a3-f393-e0a9-e50e24dcca9e" // NOTIFY: machine -> app
+#define BLE_COMMAND_CHAR_UUID "6e400002-b5a3-f393-e0a9-e50e24dcca9e" // WRITE:  app -> machine
+
+BLEServer *pBleServer = nullptr;
+BLECharacteristic *pBleStatusChar = nullptr;
+BLECharacteristic *pBleCommandChar = nullptr;
+
+// IMPORTANT: BLE callbacks (onWrite/onConnect/onDisconnect) run on the
+// Bluetooth stack's own task, which has a small fixed stack. Calling
+// notify()/startAdvertising() directly from inside a callback can overflow
+// that stack and crash the board (confirmed on the BLE test rig). These
+// flags let the callbacks just record "something happened" - the real BLE
+// work happens in loop(), which runs on the main task with a much bigger
+// stack.
+volatile bool BleStatusUpdatePending = false;
+volatile bool BleAdvertisingRestartPending = false;
+
+class BleServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *server) override {
+    Serial.println("[BLE] App connected");
+  }
+  void onDisconnect(BLEServer *server) override {
+    Serial.println("[BLE] App disconnected");
+    BleAdvertisingRestartPending = true; // so the app/dashboard can reconnect
+  }
+};
+
+class BleCommandCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    String value = String(characteristic->getValue().c_str());
+    Serial.print("[BLE] Command received: ");
+    Serial.println(value);
+
+    if (value.startsWith("{")) {
+      // SET_RECIPE payload from sendRecipeToMachine() in the app's
+      // machine.ts, e.g. {"cmd":"SET_RECIPE","tempC":92,"beanWeight":25,"waterWeight":150}
+      StaticJsonDocument<128> doc;
+      if (deserializeJson(doc, value) == DeserializationError::Ok &&
+          doc["cmd"] == "SET_RECIPE") {
+        water_temp = doc["tempC"] | water_temp;
+        bean_weight_diff = doc["beanWeight"] | bean_weight_diff;
+        water_weight = doc["waterWeight"] | water_weight;
+        RecipeReceived = true;
+      }
+    } else if (value == "START_GRIND") {
+      // Sent when the app's "Continue to Brew" is tapped on the grinder
+      // screen. Satisfies the gate in HandleGRIND() below.
+      StartCommandReceived = true;
+    } else if (value == "START_DISPENSE") {
+      // Sent when the app's "Continue to Brew" is tapped on the "Move
+      // Filtered Cup" screen - that tap IS the cup-moved-to-dispenser
+      // confirmation, so this satisfies the gate in HandleUSER_PROMPT()
+      // below (not a separate "cup moved" command - the app only ever
+      // sends this one at that point in the flow).
+      UserAcknowledgmentReceived = true;
+    } else if (value == "EMERGENCY_STOP") {
+      // NOTE: this only sets the flag for now. HandleERROR() is marked
+      // "NOT CORRECT CURRENTLY" and its case in loop() is still commented
+      // out, so this does not yet force actuators off or change state -
+      // that needs HandleERROR() finished and enabled first.
+      EmergencyStopReceived = true;
     }
-    else {
-        // Already initialized - ready state
-        // Ensure all actuators are OFF (safe state)
-        digitalWrite(MOTOR_DRIVER_PIN, LOW);
-        digitalWrite(PUMP_1_PIN, LOW);
-        digitalWrite(PUMP_2_PIN, LOW);
-        digitalWrite(HEATER_PIN, LOW);
-        digitalWrite(SOLENOID_PIN, LOW);
-        
-        // Wait for recipe from app
-        if (RecipeReceived == true){
-            CurrentRecipe.TargetBeanWeight = bean_weight_diff;
-            CurrentRecipe.TargetWaterTemp = water_temp;
-            CurrentRecipe.TargetWaterWeight = 0;
-            CurrentRecipe.TargetFlowRate = flow_rate;
-            
-            CurrentState = GRIND;
-            StateStartTime = millis();
-            memset(&StateFlags, 0, sizeof(StateFlags));
-            RecipeReceived = false;
-        }
+
+    BleStatusUpdatePending = true;
+  }
+};
+
+// Turns the current MachineStates enum value into the string the app
+// expects in its "status" field.
+const char *BleStateName(MachineStates state) {
+  switch (state) {
+    case IDLE: return "IDLE";
+    case GRIND: return "GRIND";
+    case USER_PROMPT: return "USER_PROMPT";
+    case PUMP: return "PUMP";
+    case HEAT: return "HEAT";
+    case DISPENSE: return "DISPENSE";
+    case ERROR: return "ERROR";
+  }
+  return "UNKNOWN";
+}
+
+void BleSendStatusUpdate() {
+  StaticJsonDocument<256> doc;
+  doc["status"] = BleStateName(CurrentState);
+  // DS18B20 reads Celsius; the app's screens are labelled "°F".
+  doc["boilerTemp"] = (int)round(CurrentTemperature * 9.0 / 5.0 + 32.0);
+  // No cup/tank sensors on this build yet - intentionally omitted rather
+  // than faked. The app treats a missing cupPresent as "cup present".
+
+  String json;
+  serializeJson(doc, json);
+
+  pBleStatusChar->setValue(json.c_str());
+  pBleStatusChar->notify();
+}
+
+void BleSetup() {
+  BLEDevice::init("PourOver1-BLE-Test"); // must match exactly - the app scans for this name
+  pBleServer = BLEDevice::createServer();
+  pBleServer->setCallbacks(new BleServerCallbacks());
+
+  BLEService *pService = pBleServer->createService(BLE_SERVICE_UUID);
+
+  pBleStatusChar = pService->createCharacteristic(
+      BLE_STATUS_CHAR_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pBleStatusChar->addDescriptor(new BLE2902());
+
+  pBleCommandChar = pService->createCharacteristic(
+      BLE_COMMAND_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pBleCommandChar->setCallbacks(new BleCommandCallbacks());
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  BLEDevice::startAdvertising();
+
+  Serial.println("[BLE] Advertising as 'PourOver1-BLE-Test'");
+}
+
+// Replaces the boot-self-test HandleIDLE() that used to live here
+// (commented out) - it referenced hardware that isn't in this version of
+// the file any more (MOTOR_DRIVER_PIN, a single LoadCellBeans/
+// CalibrationFactorBeans, and a LoadCellWater/CalibrationFactorWater -
+// water is measured by the flow sensor now, not a load cell). Rebuilding a
+// boot self-test is worth doing once the water-sensing hardware is
+// settled; this just waits for the app's recipe, same as the old one did
+// in its "already initialized" branch.
+void HandleIDLE(){
+    // Safe state while we wait for the app to send a recipe.
+    digitalWrite(MOTOR_PWM_PIN, LOW);
+    digitalWrite(PUMP_1_PIN, LOW);
+    digitalWrite(PUMP_2_PIN, LOW);
+    digitalWrite(HEATER_PIN, LOW);
+    digitalWrite(SOLENOID_PIN, LOW);
+
+    if (RecipeReceived) {
+        CurrentRecipe.TargetBeanWeight = bean_weight_diff;
+        CurrentRecipe.TargetWaterTemp = water_temp;
+        CurrentRecipe.TargetWaterWeight = water_weight;
+        CurrentRecipe.TargetFlowRate = flow_rate;
+        RecipeReceived = false;
+
+        Serial.println("[IDLE] Recipe received, moving to GRIND");
+        CurrentState = GRIND;
+        StateStartTime = millis();
+        memset(&StateFlags, 0, sizeof(StateFlags));
     }
 }
-*/
 
 void HandleTARE(){
     delay(5000);
@@ -440,9 +480,16 @@ void HandleGRIND(){
     
     // PHASE 2: Wait for user confirmation, then measure initial weight and start motor
     if (StateFlags.GRIND_WeightMeasured == false) {
+        bool confirmed = false;
         if (Serial.available()) {
             char input = Serial.read();
-            if (input == 's' || input == 'S') {
+            if (input == 's' || input == 'S') confirmed = true;
+        }
+        if (StartCommandReceived) {   // set by onWrite() for the app's "START_GRIND"
+            StartCommandReceived = false;
+            confirmed = true;
+        }
+        if (confirmed) {
                 Serial.println("[GRIND] Container confirmed. Measuring initial weight...");
             
                 StateStartTime = millis();
@@ -459,9 +506,8 @@ void HandleGRIND(){
                 Serial.println("[GRIND TEST] Motor turned ON"); //TEST
                 StateFlags.GRIND_WeightMeasured = true;
                 return;
-            }
         }
-        
+
         // Check timeout while waiting for container confirmation (5 minutes)
         if (millis() - StateStartTime > 300000) {
             Serial.println("[GRIND] TIMEOUT waiting for container confirmation");
@@ -553,24 +599,30 @@ void HandleUSER_PROMPT(){
     
     // PHASE 1: Wait for user confirmation
     if (StateFlags.USER_PromptAcknowledged == false) {
+        bool cupConfirmed = false;
         // Check for serial input
         if (Serial.available()) {
             char input = Serial.read();
-            if (input == 'c' || input == 'C') {
-                StateFlags.USER_PromptAcknowledged = true;
-                
-                // Start PUMP_1 (fill boiler)
-                digitalWrite(PUMP_1_PIN, HIGH);
-                Serial.println("[USER_PROMPT] Container confirmed. Pump started - filling boiler...");
-                Serial.println("[USER_PROMPT] Target water weight: " + String(CurrentRecipe.TargetWaterWeight) + " mL");
-                
-                // Reset pump timer
-                StateStartTime = millis();
-                CurrentWeightWater = 0.0;
-                return;
-            }
+            if (input == 'c' || input == 'C') cupConfirmed = true;
         }
-        
+        if (UserAcknowledgmentReceived) {   // set by onWrite() for the app's "START_DISPENSE"
+            UserAcknowledgmentReceived = false;
+            cupConfirmed = true;
+        }
+        if (cupConfirmed) {
+            StateFlags.USER_PromptAcknowledged = true;
+
+            // Start PUMP_1 (fill boiler)
+            digitalWrite(PUMP_1_PIN, HIGH);
+            Serial.println("[USER_PROMPT] Container confirmed. Pump started - filling boiler...");
+            Serial.println("[USER_PROMPT] Target water weight: " + String(CurrentRecipe.TargetWaterWeight) + " mL");
+
+            // Reset pump timer
+            StateStartTime = millis();
+            CurrentWeightWater = 0.0;
+            return;
+        }
+
         // Check for timeout waiting for confirmation
         if (millis() - StateStartTime > StateDuration){
             StateFlags.USER_TimeoutOccurred = true;
@@ -887,7 +939,12 @@ void HandleDISPENSE(){
 
         StateFlags.DISPENSE_DispensingComplete = true;
         StateFlags.GENERAL_Initialized = false;
-        CurrentState = GRIND;
+        // Back to IDLE (was GRIND) so a finished brew reports "IDLE" over
+        // BLE - the app's active-brew screen specifically watches for
+        // status flipping to IDLE right after DISPENSE to show the "Enjoy
+        // your Coffee!" screen. Leaving this as GRIND made the app jump
+        // back to the grinding screen the instant the real coffee finished.
+        CurrentState = IDLE;
         StateStartTime = millis();
 
         Serial.println("[DISPENSE] ========== DISPENSE COMPLETE ==========");
@@ -936,10 +993,28 @@ void setup() {
     TempSensor.begin();
     pinMode(HEATER_PIN, OUTPUT);
     digitalWrite(HEATER_PIN, LOW);
+    BleSetup();
     HandleTARE();
 }
 
-void loop(){  
+void loop(){
+
+    // BLE work deferred from callbacks - see the comment above
+    // BleStatusUpdatePending for why this can't happen inside onWrite/etc.
+    if (BleAdvertisingRestartPending) {
+        BLEDevice::startAdvertising();
+        BleAdvertisingRestartPending = false;
+    }
+    if (BleStatusUpdatePending) {
+        BleSendStatusUpdate();
+        BleStatusUpdatePending = false;
+    }
+
+    static unsigned long lastBleNotify = 0;
+    if (pBleServer->getConnectedCount() > 0 && millis() - lastBleNotify > 2000) {
+        BleSendStatusUpdate();
+        lastBleNotify = millis();
+    }
 
     switch(CurrentState){
         case IDLE:
@@ -949,17 +1024,17 @@ void loop(){
             HandleGRIND();
             break;
         case USER_PROMPT:
-            HandleUSER_PROMPT();
+            //HandleUSER_PROMPT();
             break;
         case HEAT:
-            HandleHEAT();
+            //HandleHEAT();
             break;
         case DISPENSE:
-            HandleDISPENSE();
+            //HandleDISPENSE();
             break;
         case ERROR:
             //HandleERROR();
             break;
     }
-            
+
 }
