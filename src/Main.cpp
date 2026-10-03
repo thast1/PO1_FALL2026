@@ -50,21 +50,21 @@
 //======================================================================================
 
 // CONTROL PINS                 !!!!FIX PINS!!!!
-#define MOTOR_PWM_PIN    18
-#define MOTOR_DIR_PIN    12
-#define PUMP_1_PIN       40
-#define PUMP_2_PIN       41
-#define HEATER_PIN        8
-#define SOLENOID_PIN     42
+#define MOTOR_PWM_PIN   16
+#define MOTOR_DIR_PIN    15
+#define PUMP_1_PIN       1
+#define PUMP_2_PIN       1
+#define HEATER_PIN        1
+#define SOLENOID_PIN     1
 
 // SENSOR PINS
-#define TEMP_SENSOR_PIN 15
-#define FLOW_SENSOR_PIN_1 16
-#define FLOW_SENSOR_PIN_2 7
-#define DOUT_1          17
-#define CLK_1           20
-#define DOUT_2          10
-#define CLK_2           11
+#define TEMP_SENSOR_PIN 1
+#define FLOW_SENSOR_PIN_1 1
+#define FLOW_SENSOR_PIN_2 1
+#define DOUT_1          18
+#define CLK_1           8
+#define DOUT_2          19
+#define CLK_2           20
 
 // CONFIGURE UNUSED PINS TO INTEGRATED RESISTORS
 
@@ -996,11 +996,10 @@ void setup() {
     pinMode(HEATER_PIN, OUTPUT);
     digitalWrite(HEATER_PIN, LOW);
     BleSetup();
-    HandleTARE();
+    HandleTARE();   
 }
 
 void loop(){
-
     // BLE work deferred from callbacks - see the comment above
     // BleStatusUpdatePending for why this can't happen inside onWrite/etc.
     if (BleAdvertisingRestartPending) {
@@ -1017,7 +1016,7 @@ void loop(){
         BleSendStatusUpdate();
         lastBleNotify = millis();
     }
-
+    
     switch(CurrentState){
         case IDLE:
             HandleIDLE();
@@ -1038,5 +1037,4 @@ void loop(){
             //HandleERROR();
             break;
     }
-
 }
